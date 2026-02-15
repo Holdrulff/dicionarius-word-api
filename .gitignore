@@ -28,3 +28,5 @@ coverage.xml
 Thumbs.db
 .vscode/
 *.swp
+
+WordNet-3.0-glosstag
