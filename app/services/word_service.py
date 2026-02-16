@@ -3,64 +3,182 @@ import json
 import random
 
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-DICT_DIR = BASE_DIR / "dict"
-WORDNET_JSON_FILE = DICT_DIR / "wordnet_words_len4_8.json"
-_WORDNET_CACHE: dict[str, dict[str, list[str]]] | None = None
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIRS = {
+    "en-us": REPO_ROOT / "app" / "data" / "en-us",
+    "pt-br": REPO_ROOT / "app" / "data" / "pt-br",
+}
+SUPPORTED_LANGS = {"en-us", "pt-br"}
+DEFAULT_LANG = "en-us"
+LENGTH_FILENAME_EN = {
+    4: "four.json",
+    5: "five.json",
+    6: "six.json",
+    7: "seven.json",
+    8: "eight.json",
+}
+LENGTH_DIR_PT = {
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+}
+_WORDNET_CACHE: dict[tuple[str, int], dict[str, dict[str, list[str]]]] = {}
+_PT_BR_LETTER_CACHE: dict[tuple[int, str], dict[str, dict[str, list[str]]]] = {}
 
 
 class WordService:
-    def get_word(self, length: int, theme: str = None):
-        if length < 4 or length > 8:
-            raise ValueError("Length must be between 4 and 8.")
+    def get_word(self, length: int, lang: str = DEFAULT_LANG):
+        lang = _normalize_lang(lang)
+        if lang == "pt-br":
+            if length < 3 or length > 8:
+                raise ValueError("Length must be between 3 and 8 for pt-br.")
+        else:
+            if length < 4 or length > 8:
+                raise ValueError("Length must be between 4 and 8.")
 
-        data = _load_wordnet()
-        bucket_key = _bucket_key_for_length(length)
-        bucket = data.get(bucket_key)
+        bucket = _load_wordnet_length(lang, length)
         if not bucket:
             raise ValueError(f"No words found for length {length}.")
 
-        return random.choice(list(bucket))
+        word = random.choice(list(bucket))
+        entry = bucket[word]
+        return _normalize_entry(word, entry, lang)
     
-    def get_meanings(self, word: str) -> list[str]:
+    def get_meanings(self, word: str, lang: str = DEFAULT_LANG) -> dict[str, list[str]]:
+        lang = _normalize_lang(lang)
         word = word.strip().lower()
-        data = _load_wordnet()
+        if not word:
+            raise ValueError("Word must not be empty.")
 
-        for bucket in data.values():
+        word_len = len(word)
+        if lang == "pt-br":
+            if word_len in LENGTH_DIR_PT:
+                bucket = _load_pt_br_letter(word_len, word[0])
+                if word in bucket:
+                    return _normalize_entry(word, bucket[word], lang)
+
+            for length in LENGTH_DIR_PT:
+                bucket = _load_pt_br_letter(length, word[0])
+                if word in bucket:
+                    return _normalize_entry(word, bucket[word], lang)
+            raise ValueError(f"Word '{word}' not found in wordnet.")
+
+        if word_len in LENGTH_FILENAME_EN:
+            bucket = _load_wordnet_length(lang, word_len)
             if word in bucket:
-                meanings = bucket[word]
-                return meanings
+                return _normalize_entry(word, bucket[word], lang)
+
+        for length in LENGTH_FILENAME_EN:
+            bucket = _load_wordnet_length(lang, length)
+            if word in bucket:
+                return _normalize_entry(word, bucket[word], lang)
         raise ValueError(f"Word '{word}' not found in wordnet.")
 
-def _bucket_key_for_length(length: int) -> str:
-    match length:
-        case 4:
-            return "len_four"
-        case 5:
-            return "len_five"
-        case 6:
-            return "len_six"
-        case 7:
-            return "len_seven"
-        case 8:
-            return "len_eight"
-        case _:
-            raise ValueError("Length must be between 4 and 8.")
+def _normalize_lang(lang: str) -> str:
+    if not lang:
+        return DEFAULT_LANG
+    lang = lang.strip().lower()
+    if lang not in SUPPORTED_LANGS:
+        raise ValueError(f"Unsupported lang '{lang}'. Use one of: en-us, pt-br.")
+    return lang
 
+def _normalize_entry(word: str, entry: dict[str, list[str]], lang: str) -> dict[str, list[str]]:
+    if not isinstance(entry, dict):
+        raise ValueError("Invalid wordnet entry format.")
 
-def _load_wordnet() -> dict[str, dict[str, list[str]]]:
-    global _WORDNET_CACHE
-    if _WORDNET_CACHE is not None:
-        return _WORDNET_CACHE
+    definitions = entry.get("definitions", [])
+    synonyms = entry.get("synonyms", [])
+    if lang == "pt-br":
+        usages = entry.get("usages", entry.get("examples", []))
+    else:
+        usages = entry.get("usages", [])
 
-    if not WORDNET_JSON_FILE.exists():
-        raise FileNotFoundError(f"Word file '{WORDNET_JSON_FILE}' not found.")
+    return {
+        "word": word,
+        "definitions": definitions,
+        "synonyms": synonyms,
+        "usages": usages,
+    }
 
-    with WORDNET_JSON_FILE.open("r", encoding="utf-8") as f:
+def _load_wordnet_length(lang: str, length: int) -> dict[str, dict[str, list[str]]]:
+    if lang == "en-us":
+        return _load_en_us_length(length)
+    if lang == "pt-br":
+        return _load_pt_br_length(length)
+    raise ValueError(f"Unsupported lang '{lang}'. Use one of: en-us, pt-br.")
+
+def _load_en_us_length(length: int) -> dict[str, dict[str, list[str]]]:
+    if length not in LENGTH_FILENAME_EN:
+        raise ValueError("Length must be between 4 and 8.")
+
+    cache_key = ("en-us", length)
+    cached = _WORDNET_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    path = DATA_DIRS["en-us"] / LENGTH_FILENAME_EN[length]
+    if not path.exists():
+        raise FileNotFoundError(f"Word file '{path}' not found.")
+
+    with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
     if not isinstance(data, dict):
         raise ValueError("Invalid wordnet JSON format.")
 
-    _WORDNET_CACHE = data
+    _WORDNET_CACHE[cache_key] = data
+    return data
+
+def _load_pt_br_length(length: int) -> dict[str, dict[str, list[str]]]:
+    if length not in LENGTH_DIR_PT:
+        raise ValueError("Length must be between 3 and 8 for pt-br.")
+
+    cache_key = ("pt-br", length)
+    cached = _WORDNET_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    length_dir = DATA_DIRS["pt-br"] / LENGTH_DIR_PT[length]
+    if not length_dir.exists():
+        raise FileNotFoundError(f"Word directory '{length_dir}' not found.")
+
+    merged: dict[str, dict[str, list[str]]] = {}
+    for path in length_dir.glob("*.json"):
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid wordnet JSON format in '{path}'.")
+        merged.update(data)
+
+    _WORDNET_CACHE[cache_key] = merged
+    return merged
+
+def _load_pt_br_letter(length: int, letter: str) -> dict[str, dict[str, list[str]]]:
+    if length not in LENGTH_DIR_PT:
+        return {}
+
+    letter = (letter or "").strip().lower()
+    if not letter:
+        return {}
+
+    cache_key = (length, letter)
+    cached = _PT_BR_LETTER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    length_dir = DATA_DIRS["pt-br"] / LENGTH_DIR_PT[length]
+    path = length_dir / f"{letter}.json"
+    if not path.exists():
+        _PT_BR_LETTER_CACHE[cache_key] = {}
+        return {}
+
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid wordnet JSON format in '{path}'.")
+
+    _PT_BR_LETTER_CACHE[cache_key] = data
     return data
